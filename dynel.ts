@@ -1,61 +1,25 @@
-type Listener<T> = (data: T) => void;
+import { State, Event } from "./utils.ts";
+import type { Listener } from "./utils.ts";
 
 /**
- * Represents a state container with value change notifications.
- * @template T The type of value stored in the state
+ * Component property class extending State
  */
-class State<T> {
-  private value: T | undefined;
-  /**
-   * Array of callback functions to be called when value changes
-   */
-  setCbs: (Listener<typeof this.value>)[];
-  /**
-   * Creates a new State instance
-   * @param initialValue Optional initial value
-   */
-  constructor(initialValue?: T) {
-    this.value = initialValue;
-    this.setCbs = [];
-  }
-  /**
-   * Registers a callback to be called when value changes
-   * @param cb Callback function receiving new and old values
-   */
-  onSet(cb: typeof this.setCbs[0]) {
-    this.setCbs.push(cb);
-  }
-  /**
-   * Sets a new value and triggers callbacks
-   * @param newValue The new value to set
-   */
-  set(newValue: typeof this.value) {
-    this.value = newValue;
-    this.setCbs.forEach((cb) => cb(this.value));
-  }
-  /**
-   * Gets the current value
-   * @returns Current value
-   */
-  get() {
-    return this.value;
-  }
-}
+class Prop<T> extends State<T> {}
 
 /**
  * Custom element for dynamic component loading and management
  */
 class Dynel extends HTMLElement {
   /** Component kind identifier */
-  name: string;
-  /** Source template ID */
-  sourceId: string;
+  public readonly name: string;
   /** Unique identifier for this instance */
-  uid: string;
+  public readonly uid: string;
+  /** Source template ID */
+  private sourceId: string;
   /** Root of the instance */
-  root: Dynel | ShadowRoot;
+  private root: Dynel | ShadowRoot;
   /** Controls whether the component uses Shadow DOM encapsulation */
-  useShadow: boolean;
+  private useShadow: boolean;
 
   constructor() {
     super();
@@ -63,9 +27,9 @@ class Dynel extends HTMLElement {
     this.root = this.useShadow ? this.attachShadow({ mode: "open" }) : this;
     this.uid = (Date.now() * 100 + Math.trunc(Math.random() * 10000))
       .toString();
-    Dynel.registerElem(this.uid, this);
     this.name = "default-element";
     this.sourceId = "default";
+    Dynel.registerInstance(this.uid, this);
   }
   /** Called when element is connected to DOM */
   connectedCallback() {
@@ -73,6 +37,7 @@ class Dynel extends HTMLElement {
       this.sourceId,
       (containerNode) => {
         this.assemble(containerNode!);
+        Dynel.dispatch("ready:" + this.name, this);
       },
     );
   }
@@ -121,31 +86,33 @@ class Dynel extends HTMLElement {
     });
   }
   /**
-   * Processes style elements by adding component name as prefix if not using Shadow DOM.
-   * This allows for ref attribute selectors to be scoped to the component.
-   * @param elem The style element to process
+   * Processes style elements by scoping ref selectors to component
+   * @param elem Style element to process
    */
   private prepareStyle(elem: HTMLStyleElement) {
     this.useShadow || (elem.textContent = (elem.textContent ?? "")
       .replaceAll(
         /(\[\s*ref\s*=\s*"(\w+)"\s*\])/g,
         `${this.name} $1`,
+      )
+      .replaceAll(
+        "self",
+        this.name,
       ));
   }
   /**
-   * Processes script elements by injecting component context (uid) into utility function calls.
-   * Handles $subscribe, $prop and $ref function calls to bind them to this component instance.
-   * @param elem The script element to process 
+   * Injects component context into utility function calls
+   * @param elem Script element to process
    */
   private prepareScript(elem: HTMLScriptElement) {
     elem.textContent = (elem.textContent ?? "")
       .replaceAll(
-        /\$subscribe\s*\(\s*"(\w+)"/g,
-        `$subscribe("${this.uid}", "$1"`,
+        /(\$(onProp|onState))\s*\(\s*"((\w+)(\-\w+)*)"/g,
+        `$1("${this.uid}", "$3"`,
       )
       .replaceAll(
-        /(\$(prop|ref))\(\s*"(\w+)"\s*\)/g,
-        `$1("${this.uid}","$3")`,
+        /(\$(prop|ref|state))\(\s*"((\w+)(\-\w+)*)"\s*/g,
+        `$1("${this.uid}","$3"`,
       );
   }
 
@@ -154,8 +121,12 @@ class Dynel extends HTMLElement {
   /** File extension for component templates */
   private static extension: string = ".dynel.html";
   /** Prefix differentiating props from attributes */
-  private static propPrefix: string = "@";
+  private static propPrefix: string = "prop-";
 
+  /**
+   * Configures Dynel settings
+   * @param options Configuration options
+   */
   public static configure(
     options: { baseUrl?: string; extension?: string; propPrefix?: string },
   ) {
@@ -164,72 +135,163 @@ class Dynel extends HTMLElement {
     if (options.propPrefix) Dynel.propPrefix = options.propPrefix;
   }
   /**
-   * Generates a unique key from uid and name
+   * Generates unique key from uid and name
    * @param uid Unique identifier
    * @param name Property/reference name
    */
   private static key(uid: string, name: string): string {
     return name + "." + uid;
   }
-  /** Map of property states */
-  private static propMap: Map<string, State<string>> = new Map();
   /**
-   * Sets a property value
+   * Sets property value
    * @param uid Component instance ID
    * @param propName Property name
    * @param newValue New value
    */
   private static setProp(uid: string, propName: string, newValue: any) {
     const key = Dynel.key(uid, propName);
-    const state = Dynel.propMap.get(key) ?? new State();
-    state.set(newValue);
-    Dynel.propMap.set(key, state);
+    Prop.set(key, newValue);
+    Dynel.getElem(uid)?.setAttribute(
+      Dynel.propPrefix + propName,
+      String(newValue),
+    );
   }
   /**
-   * Gets a property value
+   * Gets property value
    * @param uid Component instance ID
    * @param propName Property name
    */
   private static getProp(uid: string, propName: string): any | undefined {
     const key = Dynel.key(uid, propName);
-    return Dynel.propMap.get(key)?.get();
+    return Prop.get(key);
   }
   /**
-   * Public method to get property value
+   * Gets or sets property value
    * @param uid Component instance ID
    * @param propName Property name
+   * @param newValue New value (optional)
    */
-  public static prop(uid: string, propName: string): any | undefined {
-    return Dynel.getProp(uid, propName);
+  public static prop(uid: string, propName: string, newValue: any) {
+    return newValue === undefined
+      ? Dynel.getProp(uid, propName)
+      : Dynel.setProp(uid, propName, newValue);
   }
-  /** Map of element instances */
-  private static elemMap: Map<string, Dynel> = new Map();
   /**
    * Subscribes to property changes
    * @param uid Component instance ID
    * @param propName Property name
    * @param cb Callback function
    */
-  public static subscribe(uid: string, propName: string, cb: () => void) {
+  public static onProp(uid: string, propName: string, cb: () => void) {
     const key = Dynel.key(uid, propName);
-    const state = Dynel.propMap.get(key) ?? new State();
-    state.onSet(() => cb());
-    Dynel.propMap.set(key, state);
+    Prop.subscribe(key, cb);
   }
+  /**
+   * Sets property value for this instance
+   * @param propName Property name
+   * @param newValue New value
+   */
+  public setProp(propName: string, newValue: any) {
+    Dynel.setProp(this.uid, propName, newValue);
+  }
+  /**
+   * Gets property value for this instance
+   * @param propName Property name
+   */
+  public getProp(propName: string): any | undefined {
+    return Dynel.getProp(this.uid, propName);
+  }
+  /**
+   * Sets internal state value
+   * @param uid Component instance ID
+   * @param stateName State name
+   * @param newValue New value
+   */
+  private static setState(uid: string, stateName: string, newValue: any) {
+    const key = Dynel.key(uid, stateName);
+    State.set(key, newValue);
+  }
+  /**
+   * Gets internal state value
+   * @param uid Component instance ID
+   * @param stateName State name
+   */
+  private static getState(uid: string, stateName: string): any | undefined {
+    const key = Dynel.key(uid, stateName);
+    return State.get(key);
+  }
+  /**
+   * Gets state value for this instance
+   * @param stateName State name
+   */
+  public getState(stateName: string): any | undefined {
+    return Dynel.getState(this.uid, stateName);
+  }
+  /**
+   * Sets state value for this instance
+   * @param stateName State name
+   * @param newValue New value
+   */
+  public setState(stateName: string, newValue: any) {
+    Dynel.setState(this.uid, stateName, newValue);
+  }
+  /**
+   * Gets or sets state value
+   * @param uid Component instance ID
+   * @param stateName State name
+   * @param newValue New value (optional)
+   */
+  public static state(uid: string, stateName: string, newValue: any) {
+    return newValue === undefined
+      ? Dynel.getState(uid, stateName)
+      : Dynel.setState(uid, stateName, newValue);
+  }
+  /**
+   * Subscribes to state changes
+   * @param uid Component instance ID
+   * @param stateName State name
+   * @param cb Callback function
+   */
+  public static onState(
+    uid: string,
+    stateName: string,
+    cb: (newValue: any) => void,
+  ) {
+    const key = Dynel.key(uid, stateName);
+    State.subscribe(key, cb);
+  }
+  /**
+   * Registers event listener
+   * @param type Event type
+   * @param cb Callback function
+   */
+  public static listen(type: string, cb: Listener<any>) {
+    Event.addListener(type, cb);
+  }
+  /**
+   * Dispatches event to listeners
+   * @param type Event type
+   * @param payload Event data
+   */
+  public static dispatch(type: string, payload?: any) {
+    Event.trigger(type, payload);
+  }
+  /** Map of element instances */
+  private static instanceMap: Map<string, Dynel> = new Map();
   /**
    * Gets element by uid
    * @param uid Component instance ID
    */
   private static getElem(uid: string) {
-    return Dynel.elemMap.get(uid)?.root;
+    return Dynel.instanceMap.get(uid);
   }
   /**
    * Registers element instance
    * @param uid Component instance ID
    * @param elem Element instance
    */
-  private static registerElem(uid: string, elem: Dynel) {
-    Dynel.elemMap.set(uid, elem);
+  private static registerInstance(uid: string, instance: Dynel) {
+    Dynel.instanceMap.set(uid, instance);
   }
   /**
    * Gets referenced element
@@ -260,43 +322,22 @@ class Dynel extends HTMLElement {
       onResult(containerNode);
       state.set(containerNode);
     } else if (!state.get()) {
-      state.onSet(onResult);
+      state.subscribe(onResult);
     } else {
       onResult(state.get());
     }
   }
-  /** Map of event type to array of callback listeners */
-  private static eventCbMap: Map<string, Listener<any>[]> = new Map();
   /**
-   * Registers a callback to be called when an event is dispatched
-   * @param type The event type to listen for
-   * @param cb Callback function that receives the event data
-   */
-  public static listen(type: string, cb: Listener<any>) {
-    const cbs = Dynel.eventCbMap.get(type) ?? [];
-    cbs.push(cb);
-    Dynel.eventCbMap.set(type, cbs);
-  }
-  /**
-   * Dispatches an event to all registered listeners
-   * @param type The event type to dispatch
-   * @param data The data to pass to listeners
-   */
-  public static dispatch(type: string, data: any) {
-    Dynel.eventCbMap.get(type)?.forEach((cb) => cb(data));
-  }
-  /**
-   * Defines a new custom element extending Dynel
-   * @param name Tag name for the custom element (must contain a hyphen)
-   * @param sourceId Optional source template ID. If not provided, name is used as the source ID
-   * @example
-   * // Define a counter element that uses counter.dynel.html as template
-   * Dynel.define('my-counter', 'counter');
+   * Defines new custom element
+   * @param name Tag name (must contain hyphen)
+   * @param sourceId Template ID (defaults to name)
+   * @param useShadow Whether to use Shadow DOM
    */
   public static define(name: string, sourceId?: string, useShadow?: boolean) {
     customElements.define(
       name,
       class extends Dynel {
+        public override readonly name: string;
         constructor() {
           super();
           this.name = name;
@@ -314,14 +355,36 @@ class Dynel extends HTMLElement {
 const {
   prop: $prop,
   ref: $ref,
-  subscribe: $subscribe,
+  state: $state,
+  onProp: $onProp,
+  onState: $onState,
   listen: $listen,
   dispatch: $dispatch,
   configure: $configure,
   define: $define,
 } = Dynel;
 
-$define("input-field", "input-field-cell");
-$define("counter-app", "counter");
+Object.assign(globalThis, {
+  $configure,
+  $dispatch,
+  $listen,
+  $prop,
+  $ref,
+  $state,
+  $onProp,
+  $onState,
+  $define,
+});
 
-export { $configure, $dispatch, $listen, $prop, $ref, $subscribe };
+export {
+  $configure,
+  $define,
+  $dispatch,
+  $listen,
+  $onProp,
+  $onState,
+  $prop,
+  $ref,
+  $state,
+  Dynel
+};
